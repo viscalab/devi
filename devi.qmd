@@ -13,14 +13,6 @@ library(broom)
 list.files("R", full.names = TRUE) |> walk(source)
 ```
 
-```{r}
- fit |> 
-  glance() |> 
-  select(null.deviance, df.null, deviance, df.residual) |> 
-  pivot_longer(cols = )
- # mutate(p_value = pchisq(null.deviance, df = df.null, lower.tail = FALSE)) 
-```
-
 ## Reading the data
 
 ```{r}
@@ -28,21 +20,50 @@ dat <- read.csv("data/my_data.csv") |>
   filter(participant == "s01")
 ```
 
-Number of trials for each value of the predictor
+## Fit a glm to the data
 
 ```{r}
-dat |> 
-  group_by(x) |> 
-  count()
+fit <- fit_glm(dat, resp, x)
 ```
-
-## Fit a logistic model to the data using glm
 
 ```{r}
-fit <- glm(resp ~ x, family = binomial(logit), data = dat)
-
-fit
+ggplot() +
+  geom_point(data = fit$prop,
+             aes(x = x, y = prop)) +
+  geom_line(data = fit$psy, 
+            aes(x = x, y = prop)) +
+  geom_segment(data = fit$param, 
+               aes(x = bias, xend = bias, 
+                   y = 0, yend = .5))
 ```
+
+## Goodness of fit
+
+To assess whether the proposed model is a good fit of the data we can look at the residual deviance
+
+```{r}
+fit$deviance |> 
+  filter(type == "residual")
+```
+
+The model is good. 
+
+
+## Null model
+
+To assess whether a model that assumes that the responses do not depend on the predictor (flat psychometric function) we can look at the null deviance
+
+```{r}
+fit$deviance |> 
+  filter(type == "null")
+```
+
+The null model (flat psychometric function) is not a good fit of the data. 
+
+
+## Goodness of fit. Looking into the details
+
+Let's first calculate the summarise of number of "Yes" and "No" responses
 
 ```{r}
 prop <- dat |> 
@@ -50,47 +71,25 @@ prop <- dat |>
   summarise(k = sum(resp), n = n(), prop = k / n)
 ```
 
-```{r}
-fit <- glm(cbind(k, n - k) ~ x, 
-           family = binomial(logit),
-           data = prop)
 
-fit
-```
-
-```{r}
-x_seq <- dat |> 
-  summarise(xmin = min(x), xmax = max(x)) |> 
-  reframe(x = seq(xmin, xmax, 10))
-
-psy <- fit |> 
-  augment(newdata = x_seq, 
-          type.predict = "response")
-```
-
-```{r}
-ggplot() +
-  geom_point(data = prop,
-             aes(x = x, y = prop)) +
-  geom_line(data = psy, 
-            aes(x = x, y = .fitted)) 
-```
-
-### Doing it by hand
-
-The statistical model is
+The proposed model is
 
 $$f(k_1, \cdots, k_8;\beta_0, \beta_1) = \prod_{i=1}^{8} \binom{120}{k_i} \Psi(x_i;\beta_0, \beta_1)^{k_i} (1-\Psi(x_i;\beta_0, \beta_1))^{120-k_i}$$
 
-and the log likelihood dropping the binomial coefficient because does not depends on the parameters
+and the log likelihood dropping the binomial coefficient because does not depends on the parameters is
 
 $$l(\beta_0, \beta_1) = \sum_{i=1}^{8} k_i  \log \Psi(x_i;\beta_0, \beta_1) + (120-k_i) \log (1-\Psi(x_i;\beta_0, \beta_1))$$
+
+We want to fit a logistic function
 
 ```{r}
 logistic_fun <- function(x, p) {
   1 / (1 + exp(-p[1] - p[2] * x))
 }
 ```
+
+
+There are several ways to create the log likelihood function, but we will use a function factory, that is a function, that allows creating another function. Here we input the data and create the negative log likelihood. We created the negative log likelihood instead of the log likelihood because the function for optimization `optim` search for a minimum. 
 
 ```{r}
 create_neg_log_lik_fun <- function(.data) {
@@ -102,8 +101,29 @@ create_neg_log_lik_fun <- function(.data) {
 
 neg_log_lik_fun <- create_neg_log_lik_fun(prop)
 
-fit_hand <- optim(c(1, .01), neg_log_lik_fun)
 ```
+
+We already have the function, so let's search for the parameters that mimize it
+
+
+```{r}
+fit_hand <- optim(c(1, .01), neg_log_lik_fun)
+
+fit_hand
+```
+The parameters, of course, are the same that those obtained using `glm`:
+
+```{r}
+fit$param
+```
+The likelihood of the proposed model is
+
+```{r}
+-fit_hand$value
+```
+
+
+Now, let's do the same for the saturated model, the model that uses one parameter for each data point
 
 ```{r}
 create_neg_log_lik_saturated_fun <- function(.data) {
@@ -120,6 +140,29 @@ fit_hand_saturated <- optim(c(.1, .1, .5, .5, .8, .9, .9, .9),
 fit_hand_saturated
 ```
 
+The parameters coincide with the proportions
+
+```{r}
+prop
+```
+
+as we know that the maximum likelihood estimator of the p parameters of a binomial distribution with known n is k / n. 
+
+The likelihood of the saturate model is
+
+```{r}
+-fit_hand_saturated$value
+```
+
+that, of course, is larger than the likelihood of proposed model. 
+
+
+The log likelihood ratio of the saturated model relative to the proposed model is
+
+$$\log{\frac{\Lambda_s}{\Lambda_p}}$$
+This is large if the saturated model is much better than the proposed model. 
+Under the proposed model 2 times this quatity (deviance) is distributed chi square with degrees of freedom equal to the difference in the number of parameters. 
+
 ```{r}
 residual_deviance_hand <- 2 * (-fit_hand_saturated$value - (-fit_hand$value))
 
@@ -127,8 +170,13 @@ residual_deviance_hand
 ```
 
 ```{r}
-
+pchisq(q = residual_deviance_hand, df = 6, lower.tail = FALSE)
 ```
+
+The proposed model is ok.
+
+
+To assess the null model:
 
 ```{r}
 create_neg_log_lik_null_fun <- function(.data) {
@@ -155,3 +203,4 @@ null_deviance_hand
 ```{r}
 pchisq(null_deviance_hand, 7, lower.tail = FALSE)
 ```
+
